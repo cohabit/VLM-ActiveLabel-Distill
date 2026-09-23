@@ -7,7 +7,7 @@ class ConfidenceEngine:
     LEVEL_4_DISCARD = "Level-4: Discard (Noise/Invalid)"
 
     @classmethod
-    def evaluate(cls, item_result: dict) -> tuple:
+    def evaluate(cls, item_result: dict, image_size: tuple = None) -> tuple:
         """
         根据多模型比对和裁判结果，评估置信度级别与路由方向。
         返回: (level_name, action) -> action 为 'AUTO_ADOPT', 'HUMAN_REVIEW', 'DISCARD'
@@ -15,19 +15,27 @@ class ConfidenceEngine:
         if not item_result:
             return cls.LEVEL_4_DISCARD, "DISCARD"
 
-        # 1. 如果多模型完全一致
-        if item_result.get("consensus") is True:
+        box = item_result.get("box") or []
+        if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
+            item_result["reliability_score"] = 0.0
+            return cls.LEVEL_4_DISCARD, "DISCARD"
+
+        model_results = item_result.get("model_results", {})
+        labels = [str(v.get("label", "Unknown")) for v in model_results.values() if isinstance(v, dict)]
+        known = [v for v in labels if v.lower() != "unknown"]
+        agreement = 1.0 if known and len(set(known)) == 1 else (len(set(known)) ** -1 if known else 0.0)
+        bbox_quality = 1.0
+        if image_size:
+            width, height = image_size
+            area_ratio = ((box[2] - box[0]) * (box[3] - box[1])) / max(width * height, 1)
+            bbox_quality = 0.7 if area_ratio < 0.001 else 1.0
+        review_quality = 1.0 if item_result.get("hard_case_review") else (0.8 if item_result.get("consensus") else 0.5)
+        score = round(100 * (0.55 * agreement + 0.25 * bbox_quality + 0.20 * review_quality), 2)
+        item_result["reliability_score"] = score
+        if item_result.get("consensus") and score >= 85:
             return cls.LEVEL_1_CONSENSUS, "AUTO_ADOPT"
-
-        # 2. 如果存在分歧，参考裁判模型打分
-        judge_res = item_result.get("judge_result")
-        if judge_res:
-            score = judge_res.get("confidence_score", 0)
-            if score >= 85:
-                return cls.LEVEL_2_JUDGE_HIGH, "AUTO_ADOPT"
-            else:
-                return cls.LEVEL_3_HUMAN_REVIEW, "HUMAN_REVIEW"
-
+        if item_result.get("hard_case_review") and score >= 80:
+            return cls.LEVEL_2_JUDGE_HIGH, "AUTO_ADOPT"
         return cls.LEVEL_3_HUMAN_REVIEW, "HUMAN_REVIEW"
 
     @staticmethod

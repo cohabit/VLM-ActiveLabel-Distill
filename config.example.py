@@ -10,8 +10,10 @@ SILICONFLOW_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 # 2. 硅基流动标准 OpenAI 兼容接口地址
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 
-# 3. 模型选型配置 (推荐配置硅基流动托管的 Qwen3-VL 系列多模态模型)
-MODEL_DETECTOR = "Qwen/Qwen3-VL-8B-Instruct"
-MODEL_A = "Qwen/Qwen3-VL-8B-Instruct"
-MODEL_B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-MODEL_JUDGE = "Qwen/Qwen3-VL-32B-Instruct"
+# 3. 项目中各模型角色。不同厂商的 OpenAI 兼容网关可分别配置。
+# 这里保留与简历/面试口径一致的角色名；默认 demo 不调用外部 API。
+MODEL_DETECTOR = "qwen3-vl-plus"
+MODEL_SECOND_VISION = "Doubao-seed-1-6-vision"
+MODEL_LOW_COST_REVIEW = "glm-4.6v-flashx"
+MODEL_HARD_CASE_REVIEW = "kimi-k2.6"
+MODEL_STRUCTURED_ROUTER = "deepseek-v4-flash"

@@ -18,17 +18,21 @@ if sys.platform.startswith("win"):
 
 # 导入配置
 try:
-    from config import (
-        SILICONFLOW_API_KEY, API_URL,
-        MODEL_DETECTOR, MODEL_A, MODEL_B, MODEL_JUDGE
-    )
+    import config as user_config
+    SILICONFLOW_API_KEY = getattr(user_config, "SILICONFLOW_API_KEY", "")
+    API_URL = getattr(user_config, "API_URL", "https://api.siliconflow.cn/v1/chat/completions")
 except ImportError:
     SILICONFLOW_API_KEY = "sk-xxxxxxxx"
     API_URL = "https://api.siliconflow.cn/v1/chat/completions"
-    MODEL_DETECTOR = "Qwen/Qwen3-VL-8B-Instruct"
-    MODEL_A = "Qwen/Qwen3-VL-8B-Instruct"
-    MODEL_B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-    MODEL_JUDGE = "Qwen/Qwen3-VL-32B-Instruct"
+
+# Keep the public demo configuration aligned with the current architecture.
+# API credentials and endpoints may come from config.py, but fixed role names
+# prevent an old local config from silently reintroducing stale model names.
+MODEL_DETECTOR = "qwen3-vl-plus"
+MODEL_SECOND_VISION = "Doubao-seed-1-6-vision"
+MODEL_LOW_COST_REVIEW = "glm-4.6v-flashx"
+MODEL_HARD_CASE_REVIEW = "kimi-k2.6"
+MODEL_STRUCTURED_ROUTER = "deepseek-v4-flash"
 
 # 导入流水线模块
 from core.detector import VLMDetector
@@ -56,7 +60,12 @@ def process_single_image(image_path: str, detector, classifier, exporter, is_moc
     classified_items = []
     for idx, d in enumerate(detections):
         box = d["box"]
-        c_res = classifier.classify_crop(image_path, box, mock_mode=is_mock)
+        c_res = classifier.classify_crop(
+            image_path,
+            box,
+            mock_mode=is_mock,
+            initial_prediction={"label": d.get("label", "Unknown"), "source": MODEL_DETECTOR},
+        )
         c_res["box"] = box
         label = c_res.get("final_label", "Unknown")
         brand = c_res.get("final_brand", "Unknown")
@@ -64,8 +73,7 @@ def process_single_image(image_path: str, detector, classifier, exporter, is_moc
         if c_res.get("consensus"):
             print(f"    - 目标 {idx+1} {box}: [一致] '{label}' (品牌: {brand})")
         else:
-            score = c_res.get("judge_result", {}).get("confidence_score", "N/A")
-            print(f"    - 目标 {idx+1} {box}: [仲裁] '{label}' (裁判打分: {score})")
+            print(f"    - 目标 {idx+1} {box}: [升级复核] '{label}' (路径: {c_res.get('review_path', [])})")
         classified_items.append(c_res)
 
     # ---------------- 阶段 3：四级置信度分层 ----------------
@@ -74,7 +82,7 @@ def process_single_image(image_path: str, detector, classifier, exporter, is_moc
     visualize_items = []
 
     for item in classified_items:
-        level, action = ConfidenceEngine.evaluate(item)
+        level, action = ConfidenceEngine.evaluate(item, image_size=(img_width, img_height))
         item["action"] = action
         item["level"] = level
         
@@ -82,7 +90,8 @@ def process_single_image(image_path: str, detector, classifier, exporter, is_moc
             "box": item["box"],
             "label": item.get("final_label", "Unknown"),
             "action": action,
-            "level": level.split(":")[0]  # 提取 Level-1 / Level-2 / Level-3
+            "level": level.split(":")[0],
+            "reliability_score": item.get("reliability_score", 0.0)
         })
 
         if action == "AUTO_ADOPT":
@@ -109,11 +118,11 @@ def process_single_image(image_path: str, detector, classifier, exporter, is_moc
         )
         yolo_lines.append(line)
 
-    label_txt_path = f"output/labels/{file_id}.txt"
+    label_txt_path = f"runtime_output/labels/{file_id}.txt"
     exporter.save_yolo_annotation(label_txt_path, yolo_lines)
 
     # 2. 绘制可视化边界框 (可直观检查位置是否准确)
-    vis_output_path = f"output/visualized/{base_name}"
+    vis_output_path = f"runtime_output/visualized/{base_name}"
     BoundingBoxVisualizer.draw_annotations(
         image_path=image_path,
         annotated_items=visualize_items,
@@ -158,33 +167,61 @@ def main():
     print(">> 启动【VLM-ActiveLabel-Distill】批量多模态智能标注与蒸馏流水线")
     print(f">> 输入目录: {os.path.abspath(args.input_dir)} (共 {len(image_files)} 张图片)")
     print(f">> 运行模式: {'[Mock 演示模式]' if is_mock else '[硅基流动真实 Qwen3-VL 模式]'}")
-    print(f">> 可视化输出目录: output/visualized/")
-    print(f">> YOLO 标注输出目录: output/labels/")
+    print(f">> 可视化输出目录: runtime_output/visualized/")
+    print(f">> YOLO 标注输出目录: runtime_output/labels/")
     print("=" * 65)
 
     # 初始化四大模块
     detector = VLMDetector(api_key=args.api_key, api_url=API_URL, model_name=MODEL_DETECTOR)
-    classifier = EnsembleJudgeClassifier(api_key=args.api_key, api_url=API_URL, model_a=MODEL_A, model_b=MODEL_B, model_judge=MODEL_JUDGE)
+    classifier = EnsembleJudgeClassifier(
+        api_key=args.api_key,
+        api_url=API_URL,
+        model_a=MODEL_SECOND_VISION,
+        model_b=MODEL_LOW_COST_REVIEW,
+        model_hard_case=MODEL_HARD_CASE_REVIEW,
+        model_judge=MODEL_STRUCTURED_ROUTER,
+        model_detector=MODEL_DETECTOR,
+    )
     exporter = YOLOExporter()
 
     summaries = []
+    all_items = []
     for img_path in image_files:
         res = process_single_image(img_path, detector, classifier, exporter, is_mock)
         summaries.append(res)
+        all_items.append(res)
 
     # 生成全局 YOLO dataset.yaml
-    output_yaml = "output/dataset.yaml"
-    exporter.generate_dataset_yaml(dataset_dir=os.path.abspath("output"), output_yaml_path=output_yaml)
+    output_yaml = "runtime_output/dataset.yaml"
+    exporter.generate_dataset_yaml(dataset_dir=os.path.abspath("runtime_output"), output_yaml_path=output_yaml)
 
     # 打印全局汇总看板
     print("\n" + "=" * 65)
     print("📊 批量标注与模型蒸馏全流程完成看板 (Batch Summary)")
-    print(f"{'图像文件名':<20} | {'检测目标数':<10} | {'自动入库(~97%)':<14} | {'人工复核(~3%)':<12}")
+    print(f"{'图像文件名':<20} | {'检测目标数':<10} | {'自动采纳':<10} | {'人工复核':<10}")
     print("-" * 65)
     for s in summaries:
         print(f"{s['file']:<20} | {s['total']:<10} | {s['auto']:<14} | {s['review']:<12}")
     print("=" * 65)
-    print("💡 验框提示: 请直接打开 [output/visualized/] 文件夹，每张图片均已画上绿色高置信度框！")
+    print("💡 验框提示: 请直接打开 [runtime_output/visualized/] 文件夹，检查框位置和分流等级。")
+
+    report_path = os.path.join("runtime_output", "annotation_run_report.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        import json
+        json.dump({
+            "project": "VLM-ActiveLabel-Distill",
+            "mode": "mock" if is_mock else "api",
+            "model_roles": {
+                "detector": MODEL_DETECTOR,
+                "second_vision": MODEL_SECOND_VISION,
+                "low_cost_review": MODEL_LOW_COST_REVIEW,
+                "hard_case_review": MODEL_HARD_CASE_REVIEW,
+                "structured_router": MODEL_STRUCTURED_ROUTER,
+            },
+            "summaries": summaries,
+            "disclaimer": "本报告基于脱敏/模拟输入，仅用于验证流程，不代表生产环境指标。",
+        }, f, ensure_ascii=False, indent=2)
+    print(f"💡 运行审计报告: {report_path}")
 
 if __name__ == "__main__":
     main()
